@@ -42,3 +42,7 @@ Thumbs.db
 /release/
 /.tmp/
 /tmp/
+
+# Local runtime secrets and binary
+.local-admin.json
+/grok2api.exe

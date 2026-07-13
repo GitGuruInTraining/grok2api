@@ -420,6 +420,10 @@ func convertAnthropicMessages(messages []anthropicMessage) ([]any, string, error
 					return nil, "", err
 				}
 				input = append(input, map[string]any{"type": "function_call_output", "call_id": toolUseID, "output": output})
+			case "thinking", "redacted_thinking":
+				// Claude Code / Anthropic clients replay thinking blocks in multi-turn history.
+				// Upstream Grok Responses does not accept them; skip safely.
+				continue
 			default:
 				return nil, "", fmt.Errorf("当前不支持 Anthropic content.type=%q", typeName)
 			}

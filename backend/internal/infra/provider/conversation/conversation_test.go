@@ -134,6 +134,34 @@ func TestConvertAnthropicMessagesRejectsUnknownRole(t *testing.T) {
 	}
 }
 
+func TestConvertAnthropicMessagesSkipsThinking(t *testing.T) {
+	// Claude Code 回放历史时会带 thinking / redacted_thinking 块，
+	// 这些块应被安全跳过，而不是报 400。
+	body := []byte(`{
+		"model":"public-chat","max_tokens":256,"stream":true,
+		"messages":[
+			{"role":"assistant","content":[{"type":"thinking","thinking":"...","signature":"s"}]},
+			{"role":"assistant","content":[{"type":"redacted_thinking","data":"d"}]},
+			{"role":"user","content":"go on"}
+		]
+	}`)
+	converted, err := ConvertRequest(body, "grok-chat-fast", OperationMessages)
+	if err != nil {
+		t.Fatalf("thinking blocks should be skipped, got: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(converted, &payload); err != nil {
+		t.Fatal(err)
+	}
+	input := payload["input"].([]any)
+	if len(input) != 1 {
+		t.Fatalf("thinking blocks should be dropped, got input %#v", input)
+	}
+	if role := input[0].(map[string]any)["role"]; role != "user" {
+		t.Fatalf("remaining role = %v", role)
+	}
+}
+
 func TestConvertResponsesJSONToChatAndMessages(t *testing.T) {
 	body := []byte(`{
 		"id":"resp_1","object":"response","created_at":123,"model":"grok-4.5","status":"completed",
