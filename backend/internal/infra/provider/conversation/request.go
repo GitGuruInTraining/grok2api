@@ -451,7 +451,8 @@ func anthropicSystemText(raw json.RawMessage) (string, error) {
 	parts := make([]string, 0, len(blocks))
 	for _, block := range blocks {
 		if block.Type != "text" {
-			return "", fmt.Errorf("system 不支持 type=%q", block.Type)
+			// system 可能含 cache_control 等非文本块，跳过而非报错。
+			continue
 		}
 		parts = append(parts, block.Text)
 	}
@@ -497,8 +498,10 @@ func anthropicToolResult(raw json.RawMessage) (string, error) {
 	for _, block := range blocks {
 		var typeName string
 		_ = json.Unmarshal(block["type"], &typeName)
+		// tool_result.content 可能含 text 之外的块（tool_reference / image / document 等）。
+		// 上游 Responses 只接受纯文本输出，安全跳过非文本块，避免 400。
 		if typeName != "text" {
-			return "", fmt.Errorf("tool_result 暂不支持 type=%q", typeName)
+			continue
 		}
 		var value string
 		_ = json.Unmarshal(block["text"], &value)
@@ -512,8 +515,9 @@ func convertAnthropicTools(tools []map[string]json.RawMessage) ([]any, error) {
 	for _, tool := range tools {
 		var typeName string
 		_ = json.Unmarshal(tool["type"], &typeName)
+		// 跳过 server tool（web_search / computer_use / bash 等），上游 Responses 不支持。
 		if typeName != "" && typeName != "custom" {
-			return nil, fmt.Errorf("当前不支持 Anthropic server tool type=%q", typeName)
+			continue
 		}
 		var name, description string
 		_ = json.Unmarshal(tool["name"], &name)
@@ -545,7 +549,8 @@ func convertAnthropicToolChoice(choice anthropicToolChoice) (any, bool, error) {
 		}
 		return map[string]any{"type": "function", "name": choice.Name}, parallel, nil
 	default:
-		return nil, false, fmt.Errorf("不支持 tool_choice.type=%q", choice.Type)
+		// 未知 tool_choice.type（如指向 server tool）回退为 auto，避免 400。
+	return "auto", parallel, nil
 	}
 }
 

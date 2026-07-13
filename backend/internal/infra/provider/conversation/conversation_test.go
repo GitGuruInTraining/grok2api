@@ -219,3 +219,69 @@ func TestConvertResponsesStream(t *testing.T) {
 		}
 	}
 }
+
+
+func TestConvertAnthropicToolResultSkipsNonText(t *testing.T) {
+	// tool_result.content 含 tool_reference 等非文本块时应跳过，不报 400。
+	body := []byte(`{
+		"model":"public-chat","max_tokens":256,"stream":true,
+		"messages":[
+			{"role":"assistant","content":[{"type":"tool_use","id":"tu_1","name":"lookup","input":{"q":"x"}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_1","content":[
+				{"type":"tool_reference","tool_use_id":"tu_1"},
+				{"type":"text","text":"ok"}
+			]}]},
+			{"role":"user","content":"go"}
+		]
+	}`)
+	converted, err := ConvertRequest(body, "grok-chat-fast", OperationMessages)
+	if err != nil {
+		t.Fatalf("non-text tool_result block should be skipped: %v", err)
+	}
+	var payload map[string]any
+	_ = json.Unmarshal(converted, &payload)
+	input := payload["input"].([]any)
+	last := input[len(input)-1].(map[string]any)
+	if last["role"] != "user" {
+		t.Fatalf("last input role = %v", last["role"])
+	}
+}
+
+func TestConvertAnthropicServerToolsAndChoiceGraceful(t *testing.T) {
+	// server tool 应被跳过；tool_choice 指向 server tool 应回退为 auto。
+	body := []byte(`{
+		"model":"public-chat","max_tokens":256,
+		"tools":[{"type":"web_search_20250305","name":"web_search"}],
+		"tool_choice":{"type":"web_search_20250305","name":"web_search"},
+		"messages":[{"role":"user","content":"hi"}]
+	}`)
+	converted, err := ConvertRequest(body, "grok-chat-fast", OperationMessages)
+	if err != nil {
+		t.Fatalf("server tool/choice should degrade gracefully: %v", err)
+	}
+	var payload map[string]any
+	_ = json.Unmarshal(converted, &payload)
+	if tools, ok := payload["tools"].([]any); ok && len(tools) != 0 {
+		t.Fatalf("server tool should be dropped, tools = %#v", tools)
+	}
+	if tc, _ := payload["tool_choice"].(string); tc != "auto" {
+		t.Fatalf("tool_choice should fall back to auto, got %#v", payload["tool_choice"])
+	}
+}
+
+func TestConvertAnthropicSystemSkipsNonText(t *testing.T) {
+	body := []byte(`{
+		"model":"public-chat","max_tokens":256,
+		"system":[{"type":"text","text":"keep me"},{"type":"cache_control"}],
+		"messages":[{"role":"user","content":"hi"}]
+	}`)
+	converted, err := ConvertRequest(body, "grok-chat-fast", OperationMessages)
+	if err != nil {
+		t.Fatalf("non-text system block should be skipped: %v", err)
+	}
+	var payload map[string]any
+	_ = json.Unmarshal(converted, &payload)
+	if payload["instructions"] != "keep me" {
+		t.Fatalf("instructions = %#v", payload["instructions"])
+	}
+}
