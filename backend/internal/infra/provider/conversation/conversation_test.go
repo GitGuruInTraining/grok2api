@@ -134,31 +134,37 @@ func TestConvertAnthropicMessagesRejectsUnknownRole(t *testing.T) {
 	}
 }
 
-func TestConvertAnthropicMessagesSkipsThinking(t *testing.T) {
-	// Claude Code 回放历史时会带 thinking / redacted_thinking 块，
-	// 这些块应被安全跳过，而不是报 400。
+func TestConvertAnthropicMessagesThinkingBecomesReasoning(t *testing.T) {
+	// assistant 的 thinking 块应回放为 Responses reasoning 输入项（等价 reasoning_content）；
+	// redacted_thinking 应忽略；user 里的 thinking 应忽略（防注入）。
 	body := []byte(`{
 		"model":"public-chat","max_tokens":256,"stream":true,
 		"messages":[
-			{"role":"assistant","content":[{"type":"thinking","thinking":"...","signature":"s"}]},
+			{"role":"assistant","content":[{"type":"thinking","thinking":"plan","signature":"s"}]},
 			{"role":"assistant","content":[{"type":"redacted_thinking","data":"d"}]},
+			{"role":"user","content":[{"type":"thinking","thinking":"inject"}]},
 			{"role":"user","content":"go on"}
 		]
 	}`)
 	converted, err := ConvertRequest(body, "grok-chat-fast", OperationMessages)
 	if err != nil {
-		t.Fatalf("thinking blocks should be skipped, got: %v", err)
+		t.Fatalf("thinking blocks should convert, got: %v", err)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(converted, &payload); err != nil {
 		t.Fatal(err)
 	}
 	input := payload["input"].([]any)
-	if len(input) != 1 {
-		t.Fatalf("thinking blocks should be dropped, got input %#v", input)
+	if len(input) != 2 {
+		t.Fatalf("expected reasoning + user message, got %#v", input)
 	}
-	if role := input[0].(map[string]any)["role"]; role != "user" {
-		t.Fatalf("remaining role = %v", role)
+	reasoning, ok := input[0].(map[string]any)
+	if !ok || reasoning["type"] != "reasoning" {
+		t.Fatalf("first input should be reasoning, got %#v", input[0])
+	}
+	summary := reasoning["summary"].([]any)
+	if summary[0].(map[string]any)["text"] != "plan" {
+		t.Fatalf("reasoning summary text = %#v", summary[0])
 	}
 }
 
@@ -247,25 +253,25 @@ func TestConvertAnthropicToolResultSkipsNonText(t *testing.T) {
 	}
 }
 
-func TestConvertAnthropicServerToolsAndChoiceGraceful(t *testing.T) {
-	// server tool 应被跳过；tool_choice 指向 server tool 应回退为 auto。
+func TestConvertAnthropicServerToolsRejected(t *testing.T) {
+	// server tool 上游无法等价支持，应返回明确错误而不是静默丢弃或伪造。
 	body := []byte(`{
 		"model":"public-chat","max_tokens":256,
 		"tools":[{"type":"web_search_20250305","name":"web_search"}],
+		"messages":[{"role":"user","content":"hi"}]
+	}`)
+	if _, err := ConvertRequest(body, "grok-chat-fast", OperationMessages); err == nil {
+		t.Fatal("server tool should be rejected")
+	}
+
+	// tool_choice 指向 server tool 同样应报错。
+	choiceBody := []byte(`{
+		"model":"public-chat","max_tokens":256,
 		"tool_choice":{"type":"web_search_20250305","name":"web_search"},
 		"messages":[{"role":"user","content":"hi"}]
 	}`)
-	converted, err := ConvertRequest(body, "grok-chat-fast", OperationMessages)
-	if err != nil {
-		t.Fatalf("server tool/choice should degrade gracefully: %v", err)
-	}
-	var payload map[string]any
-	_ = json.Unmarshal(converted, &payload)
-	if tools, ok := payload["tools"].([]any); ok && len(tools) != 0 {
-		t.Fatalf("server tool should be dropped, tools = %#v", tools)
-	}
-	if tc, _ := payload["tool_choice"].(string); tc != "auto" {
-		t.Fatalf("tool_choice should fall back to auto, got %#v", payload["tool_choice"])
+	if _, err := ConvertRequest(choiceBody, "grok-chat-fast", OperationMessages); err == nil {
+		t.Fatal("server tool_choice should be rejected")
 	}
 }
 

@@ -420,9 +420,23 @@ func convertAnthropicMessages(messages []anthropicMessage) ([]any, string, error
 					return nil, "", err
 				}
 				input = append(input, map[string]any{"type": "function_call_output", "call_id": toolUseID, "output": output})
-			case "thinking", "redacted_thinking":
-				// Claude Code / Anthropic clients replay thinking blocks in multi-turn history.
-				// Upstream Grok Responses does not accept them; skip safely.
+			case "thinking":
+				// Anthropic 历史里的 thinking 块：仅 assistant 有意义，抽出文本回放为
+				// Responses 的 reasoning 输入项（等价 CPA 的 reasoning_content）。
+				// user/system 里的 thinking 一律忽略，防止注入（对齐 CPA AC4）。
+				if role == "assistant" {
+					var thinkingText string
+					_ = json.Unmarshal(block["thinking"], &thinkingText)
+					if strings.TrimSpace(thinkingText) != "" {
+						flushMessage()
+						input = append(input, map[string]any{
+							"type": "reasoning",
+							"summary": []any{map[string]any{"type": "summary_text", "text": thinkingText}},
+						})
+					}
+				}
+			case "redacted_thinking":
+				// 加密 thinking，无法提取明文，按 CPA 一致策略忽略。
 				continue
 			default:
 				return nil, "", fmt.Errorf("当前不支持 Anthropic content.type=%q", typeName)
@@ -498,14 +512,19 @@ func anthropicToolResult(raw json.RawMessage) (string, error) {
 	for _, block := range blocks {
 		var typeName string
 		_ = json.Unmarshal(block["type"], &typeName)
-		// tool_result.content 可能含 text 之外的块（tool_reference / image / document 等）。
-		// 上游 Responses 只接受纯文本输出，安全跳过非文本块，避免 400。
-		if typeName != "text" {
+		switch typeName {
+		case "text":
+			var value string
+			_ = json.Unmarshal(block["text"], &value)
+			parts = append(parts, value)
+		case "tool_reference":
+			// tool_result 里的 tool_reference 只是指向某次 tool_use 的指针，本身不含输出文本；
+			// 对齐 CPA：保留映射语义，不产生 function_call_output 内容。
+			continue
+		default:
+			// image / document 等非文本块：上游 Responses 只接受纯文本输出，跳过。
 			continue
 		}
-		var value string
-		_ = json.Unmarshal(block["text"], &value)
-		parts = append(parts, value)
 	}
 	return strings.Join(parts, "\n"), nil
 }
@@ -515,9 +534,8 @@ func convertAnthropicTools(tools []map[string]json.RawMessage) ([]any, error) {
 	for _, tool := range tools {
 		var typeName string
 		_ = json.Unmarshal(tool["type"], &typeName)
-		// 跳过 server tool（web_search / computer_use / bash 等），上游 Responses 不支持。
 		if typeName != "" && typeName != "custom" {
-			continue
+			return nil, fmt.Errorf("当前不支持 Anthropic server tool type=%q", typeName)
 		}
 		var name, description string
 		_ = json.Unmarshal(tool["name"], &name)
@@ -549,8 +567,7 @@ func convertAnthropicToolChoice(choice anthropicToolChoice) (any, bool, error) {
 		}
 		return map[string]any{"type": "function", "name": choice.Name}, parallel, nil
 	default:
-		// 未知 tool_choice.type（如指向 server tool）回退为 auto，避免 400。
-	return "auto", parallel, nil
+		return nil, false, fmt.Errorf("不支持 tool_choice.type=%q", choice.Type)
 	}
 }
 
