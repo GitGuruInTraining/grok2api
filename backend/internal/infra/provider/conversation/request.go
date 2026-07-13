@@ -277,9 +277,8 @@ func convertMessagesRequest(body []byte, model string) ([]byte, error) {
 	if len(request.StopSequences) > 0 {
 		target["stop"] = request.StopSequences
 	}
-	if request.Metadata != nil {
-		target["metadata"] = request.Metadata
-	}
+	// Claude Code / Anthropic clients send metadata.user_id for billing attribution.
+	// Grok Build upstream rejects it ("Argument not supported: metadata"), so drop it.
 	if request.OutputConfig != nil && request.OutputConfig.Format != nil {
 		target["text"] = map[string]any{"format": map[string]any{"type": "json_schema", "name": "anthropic_output", "schema": request.OutputConfig.Format.Schema}}
 	}
